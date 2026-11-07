@@ -1,0 +1,6 @@
+{
+  "name": "Voice-Controlled Excel Assistant",
+  "description": "Voice-controlled Excel and CSV automation assistant supporting Hindi, English, and Hinglish voice commands for VLOOKUP, pivot tables, fuzzy matching, filtering, and data cleaning.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

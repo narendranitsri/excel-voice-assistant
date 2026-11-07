@@ -1,0 +1,13 @@
+# Voice-Controlled Excel Assistant - Complete Tech Stack
+streamlit>=1.35.0
+pandas>=2.2.0
+openpyxl>=3.1.2
+anthropic>=0.25.0
+google-genai>=1.0.0
+google-generativeai>=0.8.0
+rapidfuzz>=3.8.0
+plotly>=5.20.0
+gTTS>=2.5.1
+pdfplumber>=0.11.0
+streamlit-mic-recorder>=0.0.8
+Pillow>=10.2.0
