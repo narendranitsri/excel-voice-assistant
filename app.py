@@ -1,562 +1,691 @@
 """
 app.py
-======
-Voice-Controlled Excel Assistant (Phase 1 to Phase 4 Complete Architecture)
-Built with Streamlit, pandas, openpyxl, rapidfuzz, Plotly, and Anthropic Claude.
-Model configurable via CLAUDE_MODEL env var (default: claude-sonnet-5-5).
+Excel <-> Website Automation Assistant (Streamlit Main Entry Point)
+
+Supports three core modes via top Mode Switch:
+1. "Excel to Website" (Part A): Import Excel/CSV/Word, validate data, Teach Mode form scan + Gemini mapping, Semi-Auto/Auto Playwright filling with cascading dropdowns, photo compression & upload, human Login/OTP/CAPTCHA pause, and result Excel/PDF export.
+2. "Website to Excel" (Part B): Extract HTML tables (with pagination), Search-and-Fetch status by Application No/Aadhaar from an input Excel, Detail-Page scraping, certificate/PDF downloads, and clean Excel export.
+3. "Both (fill and verify)" (Part C): Submit or verify previously submitted rows against live portal status, plus full Excel vs. Website reconciliation with a color-coded "Differences" sheet.
 """
 
-from __future__ import annotations
 import os
-import json
 import io
-from typing import Dict, List, Optional, Any
+import json
+import time
 import pandas as pd
 import streamlit as st
 
-# Custom Modules (Phases 1-4)
-from actions import (
-    dispatch_action_plan,
-    export_dataframe_with_formatting,
-    execute_compare_versions,
-    execute_detect_anomalies,
-    execute_dry_run_preview,
-    get_excel_learning_explanation,
-    ActionExecutionError
+from importer import load_spreadsheet_sheets, load_word_document
+from validator import validate_dataset, ValidationIssue
+from browser import PortalBrowserManager
+from scanner import scan_live_page_fields, scan_html_string_fields
+from llm import (
+    get_gemini_api_key,
+    get_gemini_model_name,
+    generate_field_mapping_with_gemini,
+    suggest_extraction_selectors_with_gemini,
+    PortalTemplateStore,
 )
-from llm_parser import parse_instruction_unified
-from formulas import explain_formula
-from quality import audit_data_quality, auto_fix_data_quality
-from charts import generate_plotly_chart, generate_quick_dashboard
-from workflows import WorkflowRecorder
+from uploader import match_document_for_row, compress_and_resize_image
+from filler import fill_row_into_portal
+from runner import BatchExecutionState
+from extractor import (
+    detect_html_tables_from_string,
+    extract_paginated_table_live,
+    search_and_fetch_from_excel_live,
+    extract_detail_pages_live,
+    clean_extracted_dataframe,
+)
+from reconcile import reconcile_excel_vs_website, export_reconciliation_excel
+from report import export_results_excel, generate_pdf_summary_report
 from utils import (
-    extract_table_from_pdf,
-    extract_table_from_image_with_claude,
-    generate_voice_reply_audio,
-    create_executive_summary_sheet
+    mask_sensitive_value,
+    mask_dataframe_for_display,
+    parse_voice_assistant_command,
 )
 
-# Optional mic recorder
-try:
-    from streamlit_mic_recorder import mic_recorder, speech_to_text
-except ImportError:
-    mic_recorder = None
-    speech_to_text = None
-
-# Configure Streamlit
 st.set_page_config(
-    page_title="Voice-Controlled Excel Assistant",
-    page_icon="🎙️",
+    page_title="Excel <-> Website Automation Assistant",
+    page_icon="🔄",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Initialize Session State
-if "tables_store" not in st.session_state:
-    st.session_state.tables_store = {}
+# ---------------------------------------------------------------------------
+# Session State Initialization
+# ---------------------------------------------------------------------------
+if "ui_lang" not in st.session_state:
+    st.session_state.ui_lang = "Bilingual (Hindi + English)"
+if "active_df" not in st.session_state:
+    st.session_state.active_df = None
+if "raw_excel_bytes" not in st.session_state:
+    st.session_state.raw_excel_bytes = None
+if "scanned_fields" not in st.session_state:
+    st.session_state.scanned_fields = []
+if "field_mappings" not in st.session_state:
+    st.session_state.field_mappings = []
+if "browser_mgr" not in st.session_state:
+    st.session_state.browser_mgr = PortalBrowserManager(profile_dir="./browser_profile")
+if "batch_state" not in st.session_state:
+    st.session_state.batch_state = BatchExecutionState()
+if "extracted_df" not in st.session_state:
+    st.session_state.extracted_df = None
+if "reconcile_summary_df" not in st.session_state:
+    st.session_state.reconcile_summary_df = None
+if "reconcile_diff_df" not in st.session_state:
+    st.session_state.reconcile_diff_df = None
 
-if "original_tables" not in st.session_state:
-    st.session_state.original_tables = {}
+template_store = PortalTemplateStore("./templates")
 
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-if "active_table_name" not in st.session_state:
-    st.session_state.active_table_name = None
-
-if "clarification_state" not in st.session_state:
-    st.session_state.clarification_state = None
-
-if "voice_transcript" not in st.session_state:
-    st.session_state.voice_transcript = ""
-
-if "last_json_plan" not in st.session_state:
-    st.session_state.last_json_plan = None
-
-if "dry_run_pending" not in st.session_state:
-    st.session_state.dry_run_pending = None
-
-if "active_workflow_steps" not in st.session_state:
-    st.session_state.active_workflow_steps = []
-
-if "qa_response" not in st.session_state:
-    st.session_state.qa_response = None
-
-workflow_mgr = WorkflowRecorder()
-
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header { font-size: 2rem; font-weight: 700; color: #0F172A; margin-bottom: 0.2rem; }
-    .sub-header { font-size: 0.95rem; color: #475569; margin-bottom: 1.2rem; }
-    .privacy-box { background: #F0FDF4; border: 1px solid #BBF7D0; padding: 0.6rem 0.9rem; border-radius: 6px; font-size: 0.85rem; color: #166534; margin-bottom: 1rem; }
-    .card-kpi { background: #F8FAFC; border: 1px solid #E2E8F0; padding: 0.8rem; border-radius: 8px; text-align: center; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ---------------------------------------------------------
-# Sidebar Configuration
-# ---------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Sidebar Configuration & Safety Controls
+# ---------------------------------------------------------------------------
 with st.sidebar:
-    st.title("🎙️ Assistant Settings")
+    st.title("⚙️ Assistant Settings")
+    st.caption("Human-in-the-Loop Portal & Excel Automation")
 
-    # AI Engine Provider Selection
-    ai_provider = st.radio(
-        "Select AI Engine",
-        options=["Google Gemini (Recommended)", "Anthropic Claude"],
-        index=0 if os.environ.get("GEMINI_API_KEY") or not os.environ.get("ANTHROPIC_API_KEY") else 1
+    st.session_state.ui_lang = st.selectbox(
+        "भाषा / Interface Language",
+        ["Bilingual (Hindi + English)", "English", "हिंदी (Hindi)"],
+        index=0,
     )
 
-    if "Gemini" in ai_provider:
-        default_gemini = os.environ.get("GEMINI_API_KEY", "")
-        gemini_key_input = st.text_input(
-            "Google Gemini API Key",
-            value=default_gemini,
-            type="password",
-            help="Reads from GEMINI_API_KEY env var by default. Uses model: gemini-3.8-flash."
-        )
-        if gemini_key_input:
-            os.environ["GEMINI_API_KEY"] = gemini_key_input
-        st.caption("✨ Using **Google Gemini (gemini-3.8-flash)** for high-speed voice instruction planning.")
+    st.divider()
+    st.subheader("🔑 Google Gemini API (`llm.py`)")
+    active_key = get_gemini_api_key()
+    active_model = get_gemini_model_name()
+    if active_key:
+        st.success(f"GEMINI_API_KEY detected (Model: `{active_model}`)")
     else:
-        default_claude = os.environ.get("ANTHROPIC_API_KEY", "")
-        claude_key_input = st.text_input(
-            "Anthropic Claude API Key",
-            value=default_claude,
-            type="password",
-            help="Reads from ANTHROPIC_API_KEY env var."
-        )
-        if claude_key_input:
-            os.environ["ANTHROPIC_API_KEY"] = claude_key_input
-        default_model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
-        model_choice = st.text_input("Claude Model", value=default_model)
-        if model_choice:
-            os.environ["CLAUDE_MODEL"] = model_choice
-
-    st.markdown("---")
-    st.subheader("🔊 Audio & Language")
-    lang_choice = st.selectbox(
-        "Speech Recognition Language",
-        options=["hi-IN (Hindi / Hinglish)", "en-IN (Indian English)", "en-US (English)"],
-        index=0
-    )
-    lang_code = lang_choice.split(" ")[0]
-
-    enable_tts = st.toggle("Voice Reply (Text-to-Speech)", value=True, help="Speaks short status after actions.")
-    write_formulas_toggle = st.toggle("Write Dynamic Excel Formulas", value=True, help="Writes real XLOOKUP / SUMIFS formulas in output cells.")
-
-    st.markdown("---")
-    st.subheader("↺ Action History & Undo")
-    if st.session_state.history:
-        st.write(f"Actions recorded: **{len(st.session_state.history)}**")
-        if st.button("⏪ Undo Last Action", use_container_width=True):
-            last_state = st.session_state.history.pop()
-            st.session_state.tables_store = last_state["tables_store"]
-            st.session_state.active_table_name = last_state["active_table_name"]
-            st.success(f"Undid: '{last_state.get('description')}'")
-            st.rerun()
-    else:
-        st.caption("No operations performed yet.")
-
-    st.markdown("---")
-    st.subheader("💾 Saved Workflows (Macros)")
-    saved_macros = workflow_mgr.list_workflows()
-    if saved_macros:
-        macro_names = [m["name"] for m in saved_macros]
-        selected_macro = st.selectbox("Select Workflow", macro_names)
-        if st.button("▶️ Run Workflow on Active Table", use_container_width=True):
-            target_m = next((m for m in saved_macros if m["name"] == selected_macro), None)
-            if target_m:
-                updated_store, logs = workflow_mgr.replay_workflow(
-                    target_m["steps"],
-                    st.session_state.tables_store,
-                    dispatch_action_plan
-                )
-                st.session_state.tables_store = updated_store
-                st.success(f"Executed workflow '{selected_macro}' successfully!")
-                st.rerun()
-
-
-# ---------------------------------------------------------
-# Main App Header
-# ---------------------------------------------------------
-st.markdown("<div class='main-header'>Voice-Controlled Excel Assistant</div>", unsafe_allow_html=True)
-st.markdown("<div class='sub-header'>A smart, bilingual spreadsheet copilot with voice recognition, live Excel formulas, data quality audits, and automated dashboards.</div>", unsafe_allow_html=True)
-
-# Privacy Note (from User Goal Step 1)
-st.markdown("""
-<div class='privacy-box'>
-    🔒 <b>Privacy Guarantee:</b> Only sheet names, column headers, and 5 sample rows are sent to Claude for instruction planning. Your full dataset remains local and private on your machine.
-</div>
-""", unsafe_allow_html=True)
-
-
-# ---------------------------------------------------------
-# Step 1: File Uploader, Sample Loader, PDF/Image Extractor
-# ---------------------------------------------------------
-with st.expander("📁 1. Load Data: Excel, CSV, PDF or Image Table", expanded=(len(st.session_state.tables_store) == 0)):
-    tab_f1, tab_f2, tab_f3 = st.tabs(["Spreadsheets (Excel/CSV)", "Extract Table from PDF", "Extract Table from Image (Photo/Invoice)"])
-
-    with tab_f1:
-        col_up, col_samples = st.columns([2, 1])
-        with col_up:
-            up_files = st.file_uploader("Upload Excel (.xlsx, .xls) or CSV files", type=["xlsx", "xls", "csv"], accept_multiple_files=True)
-            if up_files and st.button("Process Files", key="btn_proc_files"):
-                for f in up_files:
-                    fname = f.name
-                    if fname.endswith(".csv"):
-                        df = pd.read_csv(f)
-                        st.session_state.tables_store[os.path.splitext(fname)[0]] = df
-                    else:
-                        xls = pd.ExcelFile(f)
-                        for s in xls.sheet_names:
-                            key = f"{os.path.splitext(fname)[0]}_{s}" if len(xls.sheet_names) > 1 else s
-                            st.session_state.tables_store[key] = pd.read_excel(xls, sheet_name=s)
-                st.session_state.active_table_name = list(st.session_state.tables_store.keys())[0]
-                st.success("Files loaded successfully!")
-                st.rerun()
-
-        with col_samples:
-            st.write("Or try prebuilt test tables:")
-            if st.button("Load 4 Sample Tables (Orders, Prices, Inventory, Messy Data)", key="btn_load_samples"):
-                samples_dir = "samples"
-                for sf, key in [
-                    ("sample_orders.xlsx", "Orders"),
-                    ("sample_prices.xlsx", "Prices"),
-                    ("sample_inventory.xlsx", "Inventory"),
-                    ("sample_messy_data.xlsx", "Messy_Data")
-                ]:
-                    p = os.path.join(samples_dir, sf)
-                    if os.path.exists(p):
-                        st.session_state.tables_store[key] = pd.read_excel(p)
-                st.session_state.active_table_name = "Orders"
-                st.success("Loaded 4 sample tables: Orders, Prices, Inventory, and Messy_Data!")
-                st.rerun()
-
-    with tab_f2:
-        pdf_file = st.file_uploader("Upload PDF with tables (e.g. invoice or report)", type=["pdf"])
-        if pdf_file and st.button("Extract Tables from PDF"):
-            with st.spinner("Extracting tabular data from PDF..."):
-                dfs = extract_table_from_pdf(pdf_file.read())
-                if dfs:
-                    for idx, extracted_df in enumerate(dfs, start=1):
-                        tbl_name = f"PDF_Table_{idx}"
-                        st.session_state.tables_store[tbl_name] = extracted_df
-                    st.session_state.active_table_name = f"PDF_Table_1"
-                    st.success(f"Extracted {len(dfs)} table(s) from PDF!")
-                    st.rerun()
-                else:
-                    st.warning("No structured tables detected in the uploaded PDF.")
-
-    with tab_f3:
-        img_file = st.file_uploader("Upload photo/screenshot of a table or invoice", type=["png", "jpg", "jpeg"])
-        if img_file and st.button("Extract Table with Claude Vision"):
-            with st.spinner("Analyzing image with Claude Vision..."):
-                img_df = extract_table_from_image_with_claude(img_file.read())
-                if img_df is not None:
-                    tbl_name = f"Image_Table_{len(st.session_state.tables_store)+1}"
-                    st.session_state.tables_store[tbl_name] = img_df
-                    st.session_state.active_table_name = tbl_name
-                    st.success("Successfully extracted table from image!")
-                    st.rerun()
-                else:
-                    st.error("Failed to extract structured table from the provided image.")
-
-
-# ---------------------------------------------------------
-# Tables View & Quick Actions Bar
-# ---------------------------------------------------------
-if st.session_state.tables_store:
-    tab_keys = list(st.session_state.tables_store.keys())
-    active_idx = tab_keys.index(st.session_state.active_table_name) if st.session_state.active_table_name in tab_keys else 0
-
-    col_sel, col_audit, col_dash, col_sum = st.columns([3, 2, 2, 2])
-    with col_sel:
-        selected_tbl = st.selectbox("Active Table", tab_keys, index=active_idx)
-        st.session_state.active_table_name = selected_tbl
-
-    with col_audit:
-        if st.button("🩺 Data Quality Report", use_container_width=True):
-            st.session_state["show_quality_audit"] = True
-
-    with col_dash:
-        if st.button("📊 Quick Dashboard", use_container_width=True):
-            st.session_state["show_dashboard"] = True
-
-    with col_sum:
-        if st.button("📑 Report Banao (Summary)", use_container_width=True):
-            st.session_state["show_summary_report"] = True
-
-    active_df = st.session_state.tables_store[selected_tbl]
-    st.dataframe(active_df.head(10), use_container_width=True)
-
-    # 1. Quality Audit Panel if toggled
-    if st.session_state.get("show_quality_audit"):
-        with st.expander("🩺 Data Quality Health Report", expanded=True):
-            audit = audit_data_quality(active_df)
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Health Score", f"{audit['health_score']}/100")
-            c2.metric("Duplicate Rows", audit["duplicate_rows"])
-            c3.metric("Blank Cells", audit["total_blanks"])
-            c4.metric("Mixed Type Columns", len(audit["mixed_type_columns"]))
-
-            if audit["blanks_by_column"]:
-                st.write(f"**Blank Cells by Column:** `{audit['blanks_by_column']}`")
-            if audit["extra_spaces_columns"]:
-                st.write(f"**Extra Spaces Found:** `{', '.join(audit['extra_spaces_columns'])}`")
-            if audit["invalid_emails"]:
-                st.write(f"**Invalid Emails Detected:** `{audit['invalid_emails']}`")
-            if audit["invalid_phones"]:
-                st.write(f"**Invalid Phones Detected:** `{audit['invalid_phones']}`")
-
-            if st.button("✨ Fix All Automatically (Smart Clean & Standardize)"):
-                fixed_df, fix_logs = auto_fix_data_quality(active_df)
-                st.session_state.tables_store[f"{selected_tbl}_Fixed"] = fixed_df
-                st.session_state.active_table_name = f"{selected_tbl}_Fixed"
-                st.success("Auto-fix applied! Created standardized table.")
-                st.rerun()
-
-    # 2. Quick Dashboard if toggled
-    if st.session_state.get("show_dashboard"):
-        with st.expander("📊 Quick Dashboard & Visual Insights", expanded=True):
-            dash = generate_quick_dashboard(active_df)
-            kpi_cols = st.columns(len(dash["kpis"]))
-            for idx, (k, v) in enumerate(dash["kpis"].items()):
-                kpi_cols[idx].metric(k, v)
-            for ch in dash["charts"]:
-                st.plotly_chart(ch, use_container_width=True)
-
-
-# ---------------------------------------------------------
-# Voice & Text Command Center
-# ---------------------------------------------------------
-st.markdown("### 🗣️ Voice Command or Text Instruction")
-
-col_v1, col_v2 = st.columns([2, 1])
-
-with col_v1:
-    if speech_to_text:
-        spoken = speech_to_text(language=lang_code, start_prompt="🎙️ Press to Speak", stop_prompt="⏹️ Stop Recording")
-        if spoken:
-            st.session_state.voice_transcript = spoken
-
-    user_cmd = st.text_area(
-        "Voice Instruction (Editable)",
-        value=st.session_state.voice_transcript,
-        placeholder="e.g. Orders aur Prices me Item se VLOOKUP lagao aur Unit_Price le aao",
-        height=75
-    )
-
-with col_v2:
-    st.write("⚡ **10 Example Voice Commands:**")
-    example_prompts = [
-        "Orders aur Prices me Item se VLOOKUP lagao aur Unit_Price le aao",
-        "Duplicate hatao, Quantity se sort karo, phir city wise pivot banao",
-        "Orders aur Inventory me common product nikalo",
-        "Add calculated column Total = Quantity * Unit_Price",
-        "City ke hisab se Quantity ka total sum pivot banao",
-        "Sabse zyada sale kis city mein hui?",
-        "Duplicate rows hata do",
-        "Quantity ke hisab se descending sort karo",
-        "Galat ya ajeeb values dhundo",
-        "Sales ka bar chart banao"
-    ]
-    selected_ex = st.selectbox("Choose quick command:", example_prompts)
-    if st.button("Insert Command"):
-        st.session_state.voice_transcript = selected_ex
-        st.rerun()
-
-
-# ---------------------------------------------------------
-# Clarification Dialog (Step 4)
-# ---------------------------------------------------------
-if st.session_state.clarification_state:
-    c = st.session_state.clarification_state
-    st.warning("❓ **Clarification Needed (स्पष्टीकरण चाहिए)**")
-    st.write(f"**English:** {c.get('question_en')}")
-    st.write(f"**Hindi:** {c.get('question_hi')}")
-    opts = c.get("options", [])
-    if opts:
-        choice = st.radio("Select matching column:", opts)
-        if st.button("Confirm Choice"):
-            st.session_state.voice_transcript += f" (use {choice})"
-            st.session_state.clarification_state = None
+        st.warning("GEMINI_API_KEY not found in st.secrets or environment.")
+        manual_key = st.text_input("Enter GEMINI_API_KEY (Session Only):", type="password")
+        if manual_key:
+            os.environ["GEMINI_API_KEY"] = manual_key
             st.rerun()
 
+    st.divider()
+    st.subheader("🌐 Playwright Headed Browser")
+    default_demo_path = os.path.abspath("./samples/demo_portal.html")
+    default_url = f"file://{default_demo_path}" if os.path.exists(default_demo_path) else "https://sso.rajasthan.gov.in"
+    portal_url = st.text_input("Target Portal URL:", value=default_url)
 
-# ---------------------------------------------------------
-# Dry Run Confirmation Dialog (Feature 18)
-# ---------------------------------------------------------
-if st.session_state.dry_run_pending:
-    pending = st.session_state.dry_run_pending
-    st.warning("⚠️ **Dry Run Preview: Confirmation Required**")
-    st.write(pending["message"])
-    st.dataframe(pending["preview_df"].head(10), use_container_width=True)
-
-    c_yes, c_no = st.columns(2)
-    with c_yes:
-        if st.button("✅ Confirm & Execute Action", type="primary"):
-            plan = pending["plan"]
-            st.session_state.dry_run_pending = None
-            try:
-                res_df, msg, meta = dispatch_action_plan(plan, st.session_state.tables_store)
-                out_name = meta.get("output_name", "Result")
-                st.session_state.tables_store[out_name] = res_df
-                st.session_state.active_table_name = out_name
-                st.success(f"Confirmed: {msg}")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-    with c_no:
-        if st.button("❌ Cancel"):
-            st.session_state.dry_run_pending = None
-            st.info("Action cancelled.")
-            st.rerun()
-
-
-# ---------------------------------------------------------
-# Execution Flow (Single-Step, Multi-Step, Q&A)
-# ---------------------------------------------------------
-if st.button("🚀 Execute Action", type="primary"):
-    if not user_cmd.strip():
-        st.warning("Please speak or type an instruction.")
-    elif not st.session_state.tables_store:
-        st.error("No tables loaded. Please load or upload files.")
-    else:
-        provider_name = "gemini" if "Gemini" in ai_provider else "claude"
-        spinner_msg = f"🤖 {ai_provider.split(' ')[0]} analyzing instruction..."
-        with st.spinner(spinner_msg):
-            plan, err = parse_instruction_unified(
-                instruction=user_cmd,
-                tables_store=st.session_state.tables_store,
-                provider=provider_name,
-                latest_result_name=st.session_state.active_table_name
-            )
-
-        if err:
-            st.error(f"❌ {err}")
-        elif plan:
-            # 1. Clarification needed
-            if plan.get("needs_clarification"):
-                st.session_state.clarification_state = plan
-                st.rerun()
-
-            # 2. Q&A Mode ("Ask Your Data")
-            elif plan.get("action") == "qa_query":
-                tgt_col = plan.get("target_column")
-                met_col = plan.get("metric_column")
-                agg = plan.get("agg_func", "sum")
-                curr = st.session_state.tables_store[st.session_state.active_table_name]
-                
-                if tgt_col in curr.columns and met_col in curr.columns:
-                    grouped = curr.groupby(tgt_col)[met_col].agg(agg).sort_values(ascending=False).reset_index()
-                    top_item = grouped.iloc[0]
-                    ans = f"**Answer:** Top {tgt_col} is **{top_item[tgt_col]}** with {met_col} = **{top_item[met_col]:,}**"
-                    st.success(ans)
-                    st.dataframe(grouped.head(5), use_container_width=True)
-                else:
-                    st.info(f"Query: {plan.get('question')}")
-
-            # 3. Multi-Step Pipeline (Feature 14)
-            elif plan.get("is_multi_step"):
-                steps = plan.get("steps", [])
-                st.info(f"Executing {len(steps)} sequential steps...")
-                prog_bar = st.progress(0)
-
-                for idx, step in enumerate(steps, start=1):
-                    res_df, msg, meta = dispatch_action_plan(step, st.session_state.tables_store)
-                    out_name = meta.get("output_name", f"Step_{idx}")
-                    st.session_state.tables_store[out_name] = res_df
-                    st.session_state.active_table_name = out_name
-                    prog_bar.progress(idx / len(steps))
-
-                st.success(f"Completed all {len(steps)} steps successfully!")
-                st.rerun()
-
-            # 4. Standard Single Action with Dry Run Check (Feature 18)
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        if st.button("🚀 Launch Browser", use_container_width=True):
+            ok, msg = st.session_state.browser_mgr.launch_headed_browser(portal_url)
+            if ok:
+                st.toast(msg)
             else:
-                act = plan.get("action", "")
-                if act in ["clean", "remove_duplicates"] and plan.get("operation") == "remove_duplicates":
-                    prev_df, dry_msg, meta = execute_dry_run_preview(plan, st.session_state.tables_store)
-                    if meta.get("rows_affected", 0) > 0:
-                        st.session_state.dry_run_pending = {
-                            "plan": plan,
-                            "preview_df": prev_df,
-                            "message": dry_msg
-                        }
+                st.error(msg)
+    with col_b2:
+        if st.button("🛑 Close Browser", use_container_width=True):
+            st.session_state.browser_mgr.close()
+            st.toast("Browser closed.")
+
+    st.divider()
+    st.subheader("🛡️ Safety & Rate Limiting")
+    action_delay = st.slider("Delay between fields (sec):", 0.5, 5.0, 1.2, 0.1)
+    semi_auto_mode = st.toggle("Semi-Automatic Mode (Stop before Submit)", value=True)
+    auto_submit_confirmed = False
+    if not semi_auto_mode:
+        st.warning("⚠️ Auto-Submit Enabled! The app will click Submit automatically after filling each row.")
+        auto_submit_confirmed = st.checkbox("I confirm I want Auto-Submit without manual review per row.")
+
+    mask_pii_ui = st.toggle("Mask Aadhaar/Mobile/Bank in Preview & Logs", value=True)
+
+    st.divider()
+    with st.expander("🔒 Privacy & Terms Notice", expanded=False):
+        st.markdown(
+            """
+            - **No Bypass Rule**: This app **never** bypasses or automates Login, OTP, or CAPTCHA. When detected, it pauses so you can complete them in the browser.
+            - **Zero Password Storage**: Passwords and OTPs are never read or saved.
+            - **PII Masking**: Sensitive numbers (Aadhaar, Mobile, Bank Account) are masked (`XXXXXXXX1234`) in logs and never sent in full to Gemini.
+            - **Terms of Use**: Only use this tool on websites and portals where you are authorized to submit or access data.
+            """
+        )
+
+# ---------------------------------------------------------------------------
+# Top Header & Mode Switch
+# ---------------------------------------------------------------------------
+st.title("🔄 Excel ↔ Website Automation Assistant")
+st.markdown(
+    "**Two-Way Smart Assistant**: Fill government/enterprise web forms from Excel/Word **(Part A)**, extract web tables & application statuses into Excel **(Part B)**, or verify & reconcile both **(Part C)**."
+)
+
+mode = st.radio(
+    "Select Workflow Mode / कार्य मोड चुनें:",
+    [
+        "Excel to Website",
+        "Website to Excel",
+        "Both (fill and verify)",
+    ],
+    horizontal=True,
+)
+
+# Optional Voice / Text Command Bar
+with st.expander("🎙️ Voice / Quick Command Bar (Hindi, English, Hinglish)", expanded=False):
+    col_v1, col_v2 = st.columns([3, 1])
+    with col_v1:
+        voice_text = st.text_input(
+            "Speak or type a command (e.g., 'agli row bharo', 'isko chhodo', 'ruko', 'table nikalo', 'status check karo'):",
+            placeholder="अगली पंक्ति भरें / agli row bharo / table nikalo / status check karo",
+        )
+    with col_v2:
+        try:
+            from streamlit_mic_recorder import speech_to_text
+            spoken = speech_to_text(language="hi-IN", start_prompt="🎤 Speak Command", stop_prompt="⏹️ Stop", key="mic_cmd")
+            if spoken:
+                voice_text = spoken
+        except Exception:
+            st.caption("Install `streamlit-mic-recorder` for live mic button.")
+
+    if voice_text:
+        parsed_cmd = parse_voice_assistant_command(voice_text)
+        st.info(f"**Recognized Command**: `{parsed_cmd['intent']}` — {parsed_cmd['message_hi']} ({parsed_cmd['message_en']})")
+
+st.divider()
+
+
+# ===========================================================================
+# MODE 1: EXCEL TO WEBSITE (PART A)
+# ===========================================================================
+if mode == "Excel to Website":
+    tab_import, tab_teach, tab_run, tab_report = st.tabs([
+        "1️⃣ Data Import & Validation",
+        "2️⃣ Teach Mode & Field Mapping",
+        "3️⃣ Semi-Auto Form Filler",
+        "4️⃣ Reports & Updated Excel",
+    ])
+
+    # --- TAB 1: DATA IMPORT & VALIDATION ---
+    with tab_import:
+        st.subheader("📂 Step 1: Upload Excel (.xlsx/.csv) or Word (.docx)")
+        col_u1, col_u2 = st.columns([2, 1])
+        with col_u1:
+            uploaded_file = st.file_uploader(
+                "Choose Excel, CSV, or Word file",
+                type=["xlsx", "xls", "csv", "docx"],
+            )
+        with col_u2:
+            st.markdown("**Or load bundled sample data:**")
+            if st.button("📥 Load Sample Applicants (.xlsx)", use_container_width=True):
+                sample_path = "./samples/sample_applicants.xlsx"
+                if os.path.exists(sample_path):
+                    with open(sample_path, "rb") as f:
+                        raw_bytes = f.read()
+                    st.session_state.raw_excel_bytes = raw_bytes
+                    sheets = load_spreadsheet_sheets(raw_bytes, "sample_applicants.xlsx")
+                    first_sheet = list(sheets.keys())[0]
+                    st.session_state.active_df = sheets[first_sheet]
+                    st.success(f"Loaded `{sample_path}` ({len(st.session_state.active_df)} rows)")
+
+        if uploaded_file is not None:
+            raw_bytes = uploaded_file.read()
+            fname = uploaded_file.name
+            if fname.lower().endswith(".docx"):
+                doc_res = load_word_document(raw_bytes, fname)
+                st.info(f"Extracted {len(doc_res['tables'])} table(s) and {len(doc_res['key_values'])} Label:Value fields from Word.")
+                st.session_state.active_df = doc_res["combined_df"]
+            else:
+                st.session_state.raw_excel_bytes = raw_bytes
+                sheets = load_spreadsheet_sheets(raw_bytes, fname)
+                sheet_name = st.selectbox("Select Sheet:", list(sheets.keys()))
+                st.session_state.active_df = sheets[sheet_name]
+
+        if st.session_state.active_df is not None:
+            df = st.session_state.active_df
+            st.markdown("#### ✏️ Editable Data Preview (Fix any errors directly below)")
+            display_df = mask_dataframe_for_display(df) if mask_pii_ui else df
+            edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key="part_a_editor")
+            st.session_state.active_df = edited_df
+
+            # Row selection
+            col_r1, col_r2, col_r3 = st.columns(3)
+            with col_r1:
+                row_filter_mode = st.selectbox("Rows to Process:", ["All Rows", "Row Range", "Only Pending Rows"])
+            with col_r2:
+                start_row = st.number_input("Start Row (1-indexed):", min_value=1, max_value=max(1, len(edited_df)), value=1)
+            with col_r3:
+                end_row = st.number_input("End Row (1-indexed):", min_value=1, max_value=max(1, len(edited_df)), value=len(edited_df))
+
+            # Pre-flight validation
+            st.markdown("#### ✅ Pre-Flight Data Validation (Aadhaar, Mobile, PIN, Dates, Duplicates)")
+            mandatory_cols = st.multiselect(
+                "Mandatory Columns (अनिवार्य कॉलम):",
+                options=list(edited_df.columns),
+                default=[c for c in edited_df.columns if any(k in c.lower() for k in ["name", "aadhaar", "mobile", "district"])][:4],
+            )
+            issues = validate_dataset(edited_df, mandatory_columns=mandatory_cols)
+            if not issues:
+                st.success("🎉 All rows passed validation checks! (सभी पंक्तियाँ सही हैं)")
+            else:
+                st.warning(f"Found {len(issues)} validation issue(s) across rows. Fix them in the table above before filling:")
+                issue_rows = [
+                    {
+                        "Excel Row": i.row_index + 1,
+                        "Column": i.column,
+                        "Severity": i.severity.upper(),
+                        "Message (EN)": i.message_en,
+                        "संदेश (HI)": i.message_hi,
+                    }
+                    for i in issues
+                ]
+                st.dataframe(pd.DataFrame(issue_rows), use_container_width=True)
+
+    # --- TAB 2: TEACH MODE & FIELD MAPPING ---
+    with tab_teach:
+        st.subheader("🎓 Step 2: Teach Mode (Scan Form Fields & Map to Excel Columns)")
+        col_t1, col_t2 = st.columns(2)
+
+        with col_t1:
+            if st.button("🔍 Scan Open Browser Page Fields", use_container_width=True):
+                if st.session_state.browser_mgr.page:
+                    st.session_state.scanned_fields = scan_live_page_fields(st.session_state.browser_mgr.page)
+                    st.success(f"Scanned {len(st.session_state.scanned_fields)} form fields from live browser!")
+                else:
+                    # Fallback to scanning local demo_portal.html if browser isn't open
+                    demo_path = "./samples/demo_portal.html"
+                    if os.path.exists(demo_path):
+                        with open(demo_path, "r", encoding="utf-8") as f:
+                            st.session_state.scanned_fields = scan_html_string_fields(f.read())
+                        st.info(f"Browser not open — scanned {len(st.session_state.scanned_fields)} fields from `samples/demo_portal.html`.")
+                    else:
+                        st.error("Please launch the browser first or load a saved template.")
+
+        with col_t2:
+            saved_templates = template_store.list_templates()
+            selected_tpl = st.selectbox("📂 Load Saved Portal Template:", ["-- Select Template --"] + saved_templates)
+            if selected_tpl != "-- Select Template --" and st.button("📥 Apply Template"):
+                tpl_data = template_store.load_template(selected_tpl)
+                if tpl_data:
+                    st.session_state.field_mappings = tpl_data.get("mappings", [])
+                    st.success(f"Loaded template `{selected_tpl}` ({len(st.session_state.field_mappings)} mappings)!")
+
+        if st.session_state.scanned_fields and st.session_state.active_df is not None:
+            if st.button("✨ Auto-Map Columns with Google Gemini (`llm.py`)", type="primary"):
+                with st.spinner("Sending masked column names & field labels to Gemini..."):
+                    res = generate_field_mapping_with_gemini(
+                        df=st.session_state.active_df,
+                        scanned_fields=st.session_state.scanned_fields,
+                    )
+                    st.session_state.field_mappings = res.get("mappings", [])
+                    if res.get("used_fallback"):
+                        st.warning(res.get("message_hi", "Used heuristic fallback."))
+                    else:
+                        st.success(res.get("message_hi", "Mapping generated!"))
+
+        if st.session_state.field_mappings:
+            st.markdown("#### 🔗 Review & Edit Column → Portal Field Mapping")
+            map_df = pd.DataFrame(st.session_state.field_mappings)
+            edited_map_df = st.data_editor(map_df, num_rows="dynamic", use_container_width=True, key="mapping_editor")
+            st.session_state.field_mappings = edited_map_df.to_dict(orient="records")
+
+            col_s1, col_s2 = st.columns([2, 1])
+            with col_s1:
+                new_tpl_name = st.text_input("Template Name to Save:", value="SSO_Registration_Template")
+            with col_s2:
+                if st.button("💾 Save Template JSON", use_container_width=True):
+                    path = template_store.save_template(
+                        name=new_tpl_name,
+                        portal_url=portal_url,
+                        mode="excel_to_website",
+                        mappings=st.session_state.field_mappings,
+                    )
+                    st.success(f"Saved template to `{path}`")
+
+    # --- TAB 3: SEMI-AUTO FORM FILLER ---
+    with tab_run:
+        st.subheader("🤖 Step 3: Interactive Row-by-Row Form Filling")
+        if st.session_state.active_df is None:
+            st.info("Please upload or load an Excel/Word file in Tab 1 first.")
+        else:
+            df = st.session_state.active_df
+            photos_folder = st.text_input("📁 Applicant Photos / Documents Folder:", value="./samples/photos")
+            max_photo_kb = st.number_input("Max Photo Size (KB) for Auto-Resize/Compression:", value=50, min_value=10, max_value=500)
+
+            curr_idx = st.number_input(
+                "Current Row Index (0-based):",
+                min_value=0,
+                max_value=max(0, len(df) - 1),
+                value=st.session_state.batch_state.current_row_index,
+            )
+            st.session_state.batch_state.current_row_index = curr_idx
+            current_row = df.iloc[curr_idx].to_dict()
+
+            st.markdown(f"#### 👤 Current Row #{curr_idx + 1} Preview")
+            masked_preview = {k: (mask_sensitive_value(v, k) if mask_pii_ui else v) for k, v in current_row.items()}
+            st.json(masked_preview)
+
+            # Check matched photo
+            matched_photo = match_document_for_row(current_row, photos_folder)
+            if matched_photo:
+                st.caption(f"📎 Matched Document/Photo: `{matched_photo}` (Will be auto-compressed ≤ {max_photo_kb} KB)")
+
+            # Check for Login / OTP / CAPTCHA pause
+            if st.session_state.browser_mgr.page:
+                obstacle = st.session_state.browser_mgr.detect_security_obstacle()
+                if obstacle["paused"]:
+                    st.error(
+                        f"⏸️ **PAUSED ({obstacle['reason']})**: Please login / enter OTP / captcha in the browser, then click Continue."
+                    )
+                    if st.button("▶️ Continue After Login / OTP / CAPTCHA", type="primary"):
                         st.rerun()
 
-                # Normal execution
-                st.session_state.last_json_plan = plan
-                # Record undo state
-                st.session_state.history.append({
-                    "tables_store": {k: v.copy() for k, v in st.session_state.tables_store.items()},
-                    "active_table_name": st.session_state.active_table_name,
-                    "description": user_cmd[:50]
-                })
+            col_act1, col_act2, col_act3, col_act4 = st.columns(4)
+            with col_act1:
+                if st.button("✍️ Fill Current Row in Browser", type="primary", use_container_width=True):
+                    if not st.session_state.browser_mgr.page:
+                        st.error("Please click 'Launch Browser' in the sidebar first!")
+                    else:
+                        fill_res = fill_row_into_portal(
+                            page=st.session_state.browser_mgr.page,
+                            row_data=current_row,
+                            mappings=st.session_state.field_mappings,
+                            photos_dir=photos_folder,
+                            max_photo_kb=max_photo_kb,
+                            action_delay=action_delay,
+                        )
+                        if fill_res["status"] == "PAUSED_FOR_HUMAN":
+                            st.warning(fill_res["message"])
+                        elif fill_res["status"] == "READY_FOR_REVIEW":
+                            st.success(
+                                "✅ Form filled! Stopped before Submit (Semi-Automatic Mode). Review in browser and click 'Approve & Submit' below."
+                            )
+                            if not semi_auto_mode and auto_submit_confirmed:
+                                sub_res = st.session_state.browser_mgr.click_submit_and_capture(row_index=curr_idx)
+                                st.session_state.batch_state.record_row_outcome(
+                                    row_index=curr_idx,
+                                    status=sub_res["status"],
+                                    reference_no=sub_res["reference_no"],
+                                    screenshot_path=sub_res["screenshot_path"],
+                                    error_msg=sub_res.get("error", ""),
+                                )
+                                st.success(f"Auto-Submitted! Ref No: {sub_res['reference_no']}")
 
-                res_df, msg, meta = dispatch_action_plan(plan, st.session_state.tables_store)
-                out_name = meta.get("output_name", "Result")
-                st.session_state.tables_store[out_name] = res_df
-                st.session_state.active_table_name = out_name
+            with col_act2:
+                if st.button("✅ Approve & Submit Row", use_container_width=True):
+                    if st.session_state.browser_mgr.page:
+                        sub_res = st.session_state.browser_mgr.click_submit_and_capture(row_index=curr_idx)
+                        st.session_state.batch_state.record_row_outcome(
+                            row_index=curr_idx,
+                            status=sub_res["status"],
+                            reference_no=sub_res["reference_no"],
+                            screenshot_path=sub_res["screenshot_path"],
+                            error_msg=sub_res.get("error", ""),
+                        )
+                        st.session_state.batch_state.current_row_index = min(len(df) - 1, curr_idx + 1)
+                        st.success(f"Submitted Row #{curr_idx + 1}! Application No: `{sub_res['reference_no']}`")
+                    else:
+                        st.error("Browser is not open.")
 
-                # Voice Reply (TTS Feature 23)
-                if enable_tts:
-                    audio_bytes = generate_voice_reply_audio(msg, lang="hi" if "hi" in lang_code else "en")
-                    if audio_bytes:
-                        st.audio(audio_bytes, format="audio/mp3")
+            with col_act3:
+                if st.button("⏭️ Skip Row (अगली पंक्ति)", use_container_width=True):
+                    st.session_state.batch_state.record_row_outcome(
+                        row_index=curr_idx,
+                        status="Skipped",
+                        reference_no="",
+                        screenshot_path="",
+                        error_msg="Skipped by user",
+                    )
+                    st.session_state.batch_state.current_row_index = min(len(df) - 1, curr_idx + 1)
+                    st.rerun()
 
-                st.success(f"✅ {msg}")
-                st.rerun()
+            with col_act4:
+                if st.button("💾 Save Checkpoint", use_container_width=True):
+                    cp_path = st.session_state.batch_state.save_checkpoint()
+                    st.toast(f"Saved batch checkpoint to `{cp_path}`")
 
+    # --- TAB 4: REPORTS & UPDATED EXCEL ---
+    with tab_report:
+        st.subheader("📊 Step 4: Execution Log, Proof Screenshots & Updated Excel")
+        outcomes = st.session_state.batch_state.row_outcomes
+        if not outcomes:
+            st.info("No rows processed yet in this session.")
+        else:
+            out_df = pd.DataFrame.from_dict(outcomes, orient="index")
+            st.dataframe(out_df, use_container_width=True)
 
-# ---------------------------------------------------------
-# Excel Learning Mode & Macro Saver Panels
-# ---------------------------------------------------------
-if st.session_state.last_json_plan:
-    c_learn, c_macro = st.columns(2)
-    with c_learn:
-        with st.expander("💡 Ye Kaise Kiya? (Excel Learning Mode)", expanded=False):
-            exp = get_excel_learning_explanation(st.session_state.last_json_plan)
-            st.write(f"**English:**\n{exp.get('en')}")
-            st.write(f"**Hindi (हिंदी में सीखें):**\n{exp.get('hi')}")
-
-    with c_macro:
-        with st.expander("💾 Save as Named Macro / Workflow", expanded=False):
-            macro_title = st.text_input("Macro Name", "Monthly Sales Cleanup")
-            if st.button("Save Workflow Profile"):
-                path = workflow_mgr.save_workflow(
-                    name=macro_title,
-                    description=f"Automated workflow for {macro_title}",
-                    steps=[st.session_state.last_json_plan]
+            if st.session_state.active_df is not None:
+                updated_excel_bytes = export_results_excel(
+                    original_df=st.session_state.active_df,
+                    outcomes=outcomes,
+                    raw_original_bytes=st.session_state.raw_excel_bytes,
                 )
-                st.success(f"Workflow saved: '{macro_title}'")
+                col_d1, col_d2 = st.columns(2)
+                with col_d1:
+                    st.download_button(
+                        "📥 Download Updated Excel (with Status & Application No)",
+                        data=updated_excel_bytes,
+                        file_name="applicants_results_updated.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                with col_d2:
+                    pdf_bytes = generate_pdf_summary_report(outcomes)
+                    st.download_button(
+                        "📄 Download PDF Audit Summary Report",
+                        data=pdf_bytes,
+                        file_name="automation_audit_report.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
 
 
-# ---------------------------------------------------------
-# Export Options (.xlsx, .csv, and Summary Report Sheet)
-# ---------------------------------------------------------
-if st.session_state.active_table_name in st.session_state.tables_store:
-    curr_df = st.session_state.tables_store[st.session_state.active_table_name]
-    st.markdown("---")
-    st.subheader(f"📥 Export Results: '{st.session_state.active_table_name}'")
+# ===========================================================================
+# MODE 2: WEBSITE TO EXCEL (PART B)
+# ===========================================================================
+elif mode == "Website to Excel":
+    tab_table, tab_search, tab_detail = st.tabs([
+        "1️⃣ Table & List Extractor (Multi-Page)",
+        "2️⃣ Search-and-Fetch Status from Excel",
+        "3️⃣ Detail-Page & File Downloader",
+    ])
 
-    c_dl1, c_dl2 = st.columns(2)
-    with c_dl1:
-        xlsx_buf = export_dataframe_with_formatting(curr_df)
-        st.download_button(
-            label="⬇️ Download Formatted Excel (.xlsx)",
-            data=xlsx_buf,
-            file_name=f"{st.session_state.active_table_name}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary"
+    # --- TAB 1: TABLE & LIST EXTRACTOR ---
+    with tab_table:
+        st.subheader("📋 Extract HTML Tables & Lists into Clean Excel")
+        col_e1, col_e2 = st.columns(2)
+        with col_e1:
+            max_pages = st.number_input("Max Pages to Follow (Pagination):", min_value=1, max_value=100, value=3)
+            next_selector = st.text_input("Next Page Button Selector:", value="button#next-page, a.next-page")
+        with col_e2:
+            clean_numbers = st.checkbox("Convert ₹ / commas to pure numbers", value=True)
+            standardize_dates = st.checkbox("Standardize dates to DD/MM/YYYY", value=True)
+
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("🔍 Extract Table from Live Browser", type="primary", use_container_width=True):
+                if st.session_state.browser_mgr.page:
+                    raw_df = extract_paginated_table_live(
+                        page=st.session_state.browser_mgr.page,
+                        next_button_selector=next_selector,
+                        max_pages=max_pages,
+                        delay_sec=action_delay,
+                    )
+                    st.session_state.extracted_df = clean_extracted_dataframe(
+                        raw_df, clean_currency=clean_numbers, standardize_dates=standardize_dates
+                    )
+                    st.success(f"Extracted {len(st.session_state.extracted_df)} rows across up to {max_pages} page(s)!")
+                else:
+                    st.error("Please launch the browser first or click 'Extract from Local Demo Portal' on the right.")
+
+        with col_btn2:
+            if st.button("🧪 Extract Table from Local Demo Portal (`demo_portal.html`)", use_container_width=True):
+                demo_path = "./samples/demo_portal.html"
+                if os.path.exists(demo_path):
+                    with open(demo_path, "r", encoding="utf-8") as f:
+                        tables = detect_html_tables_from_string(f.read())
+                    if tables:
+                        raw_df = tables[0]
+                        st.session_state.extracted_df = clean_extracted_dataframe(
+                            raw_df, clean_currency=clean_numbers, standardize_dates=standardize_dates
+                        )
+                        st.success(f"Detected {len(tables)} table(s) — loaded {len(st.session_state.extracted_df)} rows!")
+
+        if st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
+            st.markdown("#### 📊 Extracted Table Preview")
+            st.dataframe(st.session_state.extracted_df, use_container_width=True)
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                st.session_state.extracted_df.to_excel(writer, index=False, sheet_name="Extracted_Data")
+            st.download_button(
+                "📥 Download Extracted Table (.xlsx)",
+                data=buf.getvalue(),
+                file_name="website_extracted_table.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+    # --- TAB 2: SEARCH-AND-FETCH FROM EXCEL ---
+    with tab_search:
+        st.subheader("🔎 Search-and-Fetch (Input Excel of IDs → Query Website → Save Status)")
+        st.markdown(
+            "Upload an Excel file with **Application No / Aadhaar / Roll No**, and the assistant will search each ID on the portal, extract the result fields, and write them back into your Excel file."
         )
-    with c_dl2:
-        csv_data = curr_df.to_csv(index=False).encode("utf-8")
+        search_file = st.file_uploader("Upload Excel with IDs to Search:", type=["xlsx", "csv"], key="search_excel")
+        if search_file:
+            sheets = load_spreadsheet_sheets(search_file.read(), search_file.name)
+            s_df = sheets[list(sheets.keys())[0]]
+            st.session_state.active_df = s_df
+
+        if st.session_state.active_df is not None:
+            s_df = st.session_state.active_df
+            id_col = st.selectbox("Select ID Column to Search:", list(s_df.columns))
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                search_input_sel = st.text_input("Portal Search Box Selector:", value="#search-app-no")
+                search_btn_sel = st.text_input("Portal Search Button Selector:", value="#btn-search-status")
+            with col_s2:
+                result_selectors_json = st.text_area(
+                    "Result Field Selectors (JSON Column -> CSS Selector):",
+                    value=json.dumps(
+                        {
+                            "Portal_Status": "#res-status",
+                            "Approval_Date": "#res-date",
+                            "Certificate_Amount": "#res-amount",
+                            "Remarks": "#res-remarks",
+                        },
+                        indent=2,
+                    ),
+                    height=130,
+                )
+
+            if st.button("🚀 Run Search-and-Fetch Batch", type="primary"):
+                if not st.session_state.browser_mgr.page:
+                    st.error("Please launch the browser first so the assistant can search each ID.")
+                else:
+                    selectors_map = json.loads(result_selectors_json)
+                    updated_df = search_and_fetch_from_excel_live(
+                        page=st.session_state.browser_mgr.page,
+                        df=s_df,
+                        id_column=id_col,
+                        search_input_selector=search_input_sel,
+                        search_button_selector=search_btn_sel,
+                        result_selectors=selectors_map,
+                        delay_sec=action_delay,
+                    )
+                    st.session_state.active_df = updated_df
+                    st.success("Search-and-Fetch complete!")
+                    st.dataframe(updated_df, use_container_width=True)
+
+                    buf = io.BytesIO()
+                    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                        updated_df.to_excel(writer, index=False, sheet_name="Status_Fetched")
+                    st.download_button(
+                        "📥 Download Updated Excel with Fetched Statuses",
+                        data=buf.getvalue(),
+                        file_name="search_and_fetch_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+
+    # --- TAB 3: DETAIL-PAGE & FILE DOWNLOADER ---
+    with tab_detail:
+        st.subheader("📑 Detail-Page Scraper & Certificate/PDF Downloader")
+        st.markdown(
+            "When a portal table has a **'View Details'** or **'Download Certificate/Receipt'** link on each row, configure selectors below to open each detail view and save files named by ID."
+        )
+        row_link_sel = st.text_input("Row Detail Link Selector:", value="a.view-detail-link")
+        download_link_sel = st.text_input("Download PDF/Receipt Selector (optional):", value="a.download-receipt-btn")
+        downloads_folder = st.text_input("Save Downloaded Files To:", value="./downloads")
+
+        if st.button("🚀 Extract Detail Pages & Download Files"):
+            if not st.session_state.browser_mgr.page:
+                st.error("Please launch the browser first.")
+            else:
+                detail_df = extract_detail_pages_live(
+                    page=st.session_state.browser_mgr.page,
+                    detail_link_selector=row_link_sel,
+                    field_selectors={
+                        "Application_No": ".detail-app-no",
+                        "Applicant_Name": ".detail-name",
+                        "Current_Status": ".detail-status",
+                        "Verified_By": ".detail-officer",
+                    },
+                    download_selector=download_link_sel,
+                    download_dir=downloads_folder,
+                    delay_sec=action_delay,
+                )
+                st.dataframe(detail_df, use_container_width=True)
+
+
+# ===========================================================================
+# MODE 3: BOTH (FILL & VERIFY + RECONCILE) (PART C)
+# ===========================================================================
+else:
+    st.subheader("🔄 Combined Mode: Fill & Verify + Excel vs. Website Reconciliation")
+    st.markdown(
+        "Compare your master Excel sheet with data extracted from the website to automatically flag **Approved / Pending / Rejected** changes and highlight field-level discrepancies."
+    )
+
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        excel_file_c = st.file_uploader("1️⃣ Upload Master Excel File:", type=["xlsx", "csv"], key="rec_excel")
+    with col_c2:
+        web_file_c = st.file_uploader("2️⃣ Upload Website Extracted Excel (or use extracted table):", type=["xlsx", "csv"], key="rec_web")
+
+    if st.button("🧪 Load Sample Master vs. Portal Data for Reconciliation Demo"):
+        sample_path = "./samples/sample_applicants.xlsx"
+        if os.path.exists(sample_path):
+            with open(sample_path, "rb") as f:
+                sheets = load_spreadsheet_sheets(f.read(), "sample_applicants.xlsx")
+            master_df = sheets[list(sheets.keys())[0]].copy()
+            web_df = master_df.copy()
+            if len(web_df) >= 2:
+                web_df.loc[0, "Status"] = "Approved"
+                web_df.loc[1, "Amount"] = "5500"
+            summary_df, diff_df = reconcile_excel_vs_website(
+                excel_df=master_df,
+                website_df=web_df,
+                key_column=list(master_df.columns)[0],
+            )
+            st.session_state.reconcile_summary_df = summary_df
+            st.session_state.reconcile_diff_df = diff_df
+            st.success("Reconciliation completed on sample dataset!")
+
+    if excel_file_c and web_file_c:
+        s1 = load_spreadsheet_sheets(excel_file_c.read(), excel_file_c.name)
+        s2 = load_spreadsheet_sheets(web_file_c.read(), web_file_c.name)
+        df_master = s1[list(s1.keys())[0]]
+        df_web = s2[list(s2.keys())[0]]
+        common_cols = [c for c in df_master.columns if c in df_web.columns]
+        key_col = st.selectbox("Select Primary Key Column (e.g., Application_No or Aadhaar):", common_cols or list(df_master.columns))
+        if st.button("🔍 Run Reconciliation (Compare Excel vs. Website)", type="primary"):
+            summary_df, diff_df = reconcile_excel_vs_website(df_master, df_web, key_column=key_col)
+            st.session_state.reconcile_summary_df = summary_df
+            st.session_state.reconcile_diff_df = diff_df
+
+    if st.session_state.reconcile_summary_df is not None:
+        st.markdown("#### 📋 Reconciliation Summary")
+        st.dataframe(st.session_state.reconcile_summary_df, use_container_width=True)
+        st.markdown("#### ⚠️ Field-Level Differences (`Differences` Sheet)")
+        st.dataframe(st.session_state.reconcile_diff_df, use_container_width=True)
+
+        rec_bytes = export_reconciliation_excel(
+            summary_df=st.session_state.reconcile_summary_df,
+            differences_df=st.session_state.reconcile_diff_df,
+        )
         st.download_button(
-            label="⬇️ Download CSV (.csv)",
-            data=csv_data,
-            file_name=f"{st.session_state.active_table_name}.csv",
-            mime="text/csv"
+            "📥 Download Color-Coded Reconciliation Workbook (`Differences` Sheet)",
+            data=rec_bytes,
+            file_name="reconciliation_differences.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )

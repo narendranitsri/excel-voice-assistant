@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Raj eMitra / SSO Local Demo Portal (Form Fill + Status Search + Paginated Table)</title>
+  <style>
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+    body { margin: 0; background: #f4f6f9; color: #1e293b; }
+    header { background: #1e3a8a; color: #fff; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; }
+    header h1 { margin: 0; font-size: 18px; }
+    .tabs { display: flex; background: #e2e8f0; padding: 8px 24px 0; gap: 8px; border-bottom: 1px solid #cbd5e1; }
+    .tab-btn { padding: 10px 18px; border: none; background: #cbd5e1; cursor: pointer; font-weight: 600; border-radius: 6px 6px 0 0; }
+    .tab-btn.active { background: #fff; color: #1e3a8a; }
+    .container { max-width: 980px; margin: 20px auto; background: #fff; padding: 24px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+    label { font-size: 13px; font-weight: 600; color: #334155; }
+    input, select, textarea { padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; }
+    .radio-row { display: flex; gap: 14px; align-items: center; padding-top: 6px; }
+    .btn-primary { background: #1d4ed8; color: #fff; border: none; padding: 10px 20px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+    .btn-secondary { background: #64748b; color: #fff; border: none; padding: 8px 14px; border-radius: 6px; cursor: pointer; }
+    .banner-success { display: none; margin-top: 16px; padding: 14px; background: #dcfce7; border: 1px solid #22c55e; color: #166534; border-radius: 6px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 14px; }
+    th, td { border: 1px solid #cbd5e1; padding: 9px 12px; text-align: left; }
+    th { background: #f1f5f9; font-weight: 600; }
+    .badge { padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+    .badge-approved { background: #dcfce7; color: #166534; }
+    .badge-pending { background: #fef9c3; color: #854d0e; }
+    .badge-rejected { background: #fee2e2; color: #991b1b; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🏛️ जन कल्याण पोर्टल / Citizen e-Mitra Demo Portal (Local Testbed)</h1>
+    <div style="font-size: 13px;">Session: Active | Mode: Local Testing</div>
+  </header>
+
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('tab-form', this)">1. New Registration Form (Excel → Web)</button>
+    <button class="tab-btn" onclick="switchTab('tab-search', this)">2. Application Status Search (Search & Fetch)</button>
+    <button class="tab-btn" onclick="switchTab('tab-table', this)">3. Paginated Citizen Directory (Web → Excel)</button>
+  </div>
+
+  <!-- TAB 1: REGISTRATION FORM -->
+  <div id="tab-form" class="container">
+    <h2>Citizen Scheme Application Form (आवेदन प्रपत्र)</h2>
+    <p style="font-size: 13px; color: #475569;">Use this form to test <b>Part A (Excel/Word → Website)</b> including cascading dropdowns (District → Block → Village) and photo upload.</p>
+
+    <form id="citizen-form" onsubmit="handleFormSubmit(event)">
+      <div class="grid">
+        <div class="field">
+          <label for="applicant_name">Applicant Full Name (आवेदक का नाम) *</label>
+          <input type="text" id="applicant_name" name="applicant_name" placeholder="e.g. रमेश कुमार / Ramesh Kumar" required />
+        </div>
+        <div class="field">
+          <label for="father_name">Father / Husband Name (पिता/पति का नाम) *</label>
+          <input type="text" id="father_name" name="father_name" placeholder="e.g. मोहन लाल / Mohan Lal" required />
+        </div>
+        <div class="field">
+          <label for="dob">Date of Birth (जन्म तिथि - DD/MM/YYYY) *</label>
+          <input type="text" id="dob" name="dob" placeholder="DD/MM/YYYY" required />
+        </div>
+        <div class="field">
+          <label>Gender (लिंग) *</label>
+          <div class="radio-row">
+            <label><input type="radio" name="gender" value="Male" checked /> Male (पुरुष)</label>
+            <label><input type="radio" name="gender" value="Female" /> Female (महिला)</label>
+            <label><input type="radio" name="gender" value="Other" /> Other</label>
+          </div>
+        </div>
+        <div class="field">
+          <label for="mobile">Mobile Number (मोबाइल नंबर - 10 Digits) *</label>
+          <input type="text" id="mobile" name="mobile" maxlength="10" placeholder="9876543210" required />
+        </div>
+        <div class="field">
+          <label for="aadhaar">Aadhaar / Jan-Aadhaar No (12 Digits) *</label>
+          <input type="text" id="aadhaar" name="aadhaar" maxlength="12" placeholder="123412341234" required />
+        </div>
+        <div class="field">
+          <label for="category">Social Category (श्रेणी) *</label>
+          <select id="category" name="category">
+            <option value="">-- Select Category --</option>
+            <option value="General">General</option>
+            <option value="OBC">OBC</option>
+            <option value="SC">SC</option>
+            <option value="ST">ST</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="pincode">PIN Code (पिन कोड - 6 Digits) *</label>
+          <input type="text" id="pincode" name="pincode" maxlength="6" placeholder="302001" required />
+        </div>
+
+        <!-- Cascading Dropdowns: District -> Block -> Village -->
+        <div class="field">
+          <label for="district">District (जिला) *</label>
+          <select id="district" name="district" onchange="onDistrictChange()">
+            <option value="">-- Select District --</option>
+            <option value="Jaipur">Jaipur</option>
+            <option value="Jodhpur">Jodhpur</option>
+            <option value="Udaipur">Udaipur</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="block">Block / Tehsil (ब्लॉक/तहसील) *</label>
+          <select id="block" name="block" onchange="onBlockChange()">
+            <option value="">-- Select District First --</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="village">Gram Panchayat / Village (गाँव/वार्ड) *</label>
+          <select id="village" name="village">
+            <option value="">-- Select Block First --</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="annual_income">Annual Family Income (वार्षिक आय ₹)</label>
+          <input type="number" id="annual_income" name="annual_income" placeholder="45000" />
+        </div>
+
+        <div class="field">
+          <label for="applicant_photo">Applicant Passport Photo (फोटो अपलोड ≤ 50KB)</label>
+          <input type="file" id="applicant_photo" name="applicant_photo" accept=".jpg,.jpeg,.png" />
+        </div>
+        <div class="field">
+          <label for="address">Permanent Address (स्थायी पता)</label>
+          <input type="text" id="address" name="address" placeholder="Ward 4, Near Panchayat Bhawan" />
+        </div>
+      </div>
+
+      <div style="margin: 12px 0;">
+        <label><input type="checkbox" id="declaration" name="declaration" checked /> I hereby declare that the particulars given above are true (मैं घोषणा करता/करती हूँ कि उपरोक्त जानकारी सही है).</label>
+      </div>
+
+      <button type="submit" id="submit-btn" class="btn-primary">Submit Application (आवेदन जमा करें)</button>
+    </form>
+
+    <div id="submission-receipt" class="banner-success">
+      <strong>✅ Application Submitted Successfully!</strong><br/>
+      Acknowledgement / Application Number: <span id="ack-number" style="font-weight: 800; font-family: monospace;"></span>
+    </div>
+  </div>
+
+  <!-- TAB 2: APPLICATION STATUS SEARCH (PART B SEARCH-AND-FETCH) -->
+  <div id="tab-search" class="container hidden">
+    <h2>🔎 Check Application Status (आवेदन की स्थिति जानें)</h2>
+    <p style="font-size: 13px; color: #475569;">Use this tab to test <b>Part B (Search-and-Fetch from Excel)</b>. Enter an Application ID (e.g., <code>RAJ-2025-101</code>, <code>RAJ-2025-102</code>, <code>RAJ-2025-103</code>) to fetch live status.</p>
+
+    <div style="display: flex; gap: 12px; align-items: flex-end; margin-bottom: 20px;">
+      <div class="field" style="flex: 1; margin-bottom: 0;">
+        <label for="search-app-no">Application No / Aadhaar No:</label>
+        <input type="text" id="search-app-no" placeholder="Enter RAJ-2025-101" />
+      </div>
+      <button type="button" id="btn-search-status" class="btn-primary" onclick="runStatusSearch()">Search Status</button>
+    </div>
+
+    <div id="search-result-card" style="padding: 16px; border: 1px solid #cbd5e1; border-radius: 6px; background: #f8fafc;">
+      <div><strong>Application ID:</strong> <span id="res-app-id">--</span></div>
+      <div><strong>Applicant Name:</strong> <span id="res-name">--</span></div>
+      <div><strong>Portal Status:</strong> <span id="res-status">--</span></div>
+      <div><strong>Approval / Action Date:</strong> <span id="res-date">--</span></div>
+      <div><strong>Sanctioned Amount:</strong> <span id="res-amount">--</span></div>
+      <div><strong>Officer Remarks:</strong> <span id="res-remarks">--</span></div>
+    </div>
+  </div>
+
+  <!-- TAB 3: PAGINATED TABLE (PART B TABLE EXTRACTOR) -->
+  <div id="tab-table" class="container hidden">
+    <h2>📋 Sanctioned Beneficiaries List (स्वीकृत लाभार्थी सूची)</h2>
+    <p style="font-size: 13px; color: #475569;">Use this tab to test <b>Part B (Multi-Page Table Extractor)</b> and <b>Part C (Reconciliation)</b>.</p>
+
+    <table id="beneficiaries-table">
+      <thead>
+        <tr>
+          <th>Application_No</th>
+          <th>Applicant_Name</th>
+          <th>District</th>
+          <th>Block</th>
+          <th>Sanctioned_Amount</th>
+          <th>Approval_Date</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="table-body">
+        <tr>
+          <td>RAJ-2025-101</td>
+          <td>Ramesh Kumar</td>
+          <td>Jaipur</td>
+          <td>Sanganer</td>
+          <td>₹ 12,500</td>
+          <td>14/02/2025</td>
+          <td><span class="badge badge-approved">Approved</span></td>
+        </tr>
+        <tr>
+          <td>RAJ-2025-102</td>
+          <td>Sunita Devi</td>
+          <td>Jodhpur</td>
+          <td>Mandore</td>
+          <td>₹ 15,000</td>
+          <td>18/02/2025</td>
+          <td><span class="badge badge-approved">Approved</span></td>
+        </tr>
+        <tr>
+          <td>RAJ-2025-103</td>
+          <td>Mahesh Sharma</td>
+          <td>Udaipur</td>
+          <td>Girwa</td>
+          <td>₹ 10,000</td>
+          <td>21/02/2025</td>
+          <td><span class="badge badge-pending">Pending Verification</span></td>
+        </tr>
+        <tr>
+          <td>RAJ-2025-104</td>
+          <td>Kavita Meena</td>
+          <td>Jaipur</td>
+          <td>Amer</td>
+          <td>₹ 12,500</td>
+          <td>25/02/2025</td>
+          <td><span class="badge badge-rejected">Rejected - Income Proof Missing</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div style="margin-top: 14px; display: flex; justify-content: space-between; align-items: center;">
+      <span id="page-indicator">Page 1 of 2</span>
+      <button type="button" id="next-page" class="btn-secondary" onclick="loadNextTablePage()">Next Page ➡️</button>
+    </div>
+  </div>
+
+  <script>
+    const CASCADING_DATA = {
+      Jaipur: {
+        Sanganer: ["Muhana", "Bagru", "Gonera"],
+        Amer: ["Achrol", "Chomu", "Kukas"]
+      },
+      Jodhpur: {
+        Mandore: ["Boranada", "Keru", "Salawas"],
+        Osian: ["Tiwari", "Balesar", "Mathania"]
+      },
+      Udaipur: {
+        Girwa: ["Bedla", "Bhuwana", "Debari"],
+        Mavli: ["Dabok", "Fatehnagar", "Ghasa"]
+      }
+    };
+
+    const STATUS_DB = {
+      "RAJ-2025-101": { name: "Ramesh Kumar", status: "Approved", date: "14/02/2025", amount: "₹ 12,500", remarks: "Verified by Tehsildar Sanganer" },
+      "RAJ-2025-102": { name: "Sunita Devi", status: "Approved", date: "18/02/2025", amount: "₹ 15,000", remarks: "Direct Benefit Transfer Completed" },
+      "RAJ-2025-103": { name: "Mahesh Sharma", status: "Pending Verification", date: "21/02/2025", amount: "₹ 10,000", remarks: "Awaiting Gram Sevak report" },
+      "RAJ-2025-104": { name: "Kavita Meena", status: "Rejected", date: "25/02/2025", amount: "₹ 0", remarks: "Income certificate expired" }
+    };
+
+    function switchTab(tabId, btn) {
+      document.querySelectorAll('.container').forEach(el => el.classList.add('hidden'));
+      document.getElementById(tabId).classList.remove('hidden');
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    }
+
+    function onDistrictChange() {
+      const dist = document.getElementById('district').value;
+      const blockSel = document.getElementById('block');
+      const villageSel = document.getElementById('village');
+      blockSel.innerHTML = '<option value="">-- Select Block --</option>';
+      villageSel.innerHTML = '<option value="">-- Select Block First --</option>';
+      if (dist && CASCADING_DATA[dist]) {
+        // Simulate 250ms AJAX delay like real government portals
+        setTimeout(() => {
+          Object.keys(CASCADING_DATA[dist]).forEach(blk => {
+            const opt = document.createElement('option');
+            opt.value = blk;
+            opt.textContent = blk;
+            blockSel.appendChild(opt);
+          });
+        }, 250);
+      }
+    }
+
+    function onBlockChange() {
+      const dist = document.getElementById('district').value;
+      const blk = document.getElementById('block').value;
+      const villageSel = document.getElementById('village');
+      villageSel.innerHTML = '<option value="">-- Select Village --</option>';
+      if (dist && blk && CASCADING_DATA[dist] && CASCADING_DATA[dist][blk]) {
+        setTimeout(() => {
+          CASCADING_DATA[dist][blk].forEach(vil => {
+            const opt = document.createElement('option');
+            opt.value = vil;
+            opt.textContent = vil;
+            villageSel.appendChild(opt);
+          });
+        }, 250);
+      }
+    }
+
+    function handleFormSubmit(e) {
+      e.preventDefault();
+      const randAck = 'RAJ-2025-' + Math.floor(100000 + Math.random() * 900000);
+      document.getElementById('ack-number').textContent = randAck;
+      document.getElementById('submission-receipt').style.display = 'block';
+    }
+
+    function runStatusSearch() {
+      const q = document.getElementById('search-app-no').value.trim();
+      const rec = STATUS_DB[q] || {
+        name: "Applicant #" + q,
+        status: "Under Review",
+        date: "01/03/2025",
+        amount: "₹ 12,500",
+        remarks: "Forwarded to District Officer"
+      };
+      document.getElementById('res-app-id').textContent = q || "N/A";
+      document.getElementById('res-name').textContent = rec.name;
+      document.getElementById('res-status').textContent = rec.status;
+      document.getElementById('res-date').textContent = rec.date;
+      document.getElementById('res-amount').textContent = rec.amount;
+      document.getElementById('res-remarks').textContent = rec.remarks;
+    }
+
+    let currentPage = 1;
+    function loadNextTablePage() {
+      if (currentPage === 1) {
+        currentPage = 2;
+        document.getElementById('table-body').innerHTML = `
+          <tr>
+            <td>RAJ-2025-105</td>
+            <td>Suresh Verma</td>
+            <td>Jodhpur</td>
+            <td>Osian</td>
+            <td>₹ 15,000</td>
+            <td>28/02/2025</td>
+            <td><span class="badge badge-approved">Approved</span></td>
+          </tr>
+          <tr>
+            <td>RAJ-2025-106</td>
+            <td>Anita Choudhary</td>
+            <td>Udaipur</td>
+            <td>Mavli</td>
+            <td>₹ 12,500</td>
+            <td>02/03/2025</td>
+            <td><span class="badge badge-approved">Approved</span></td>
+          </tr>
+        `;
+        document.getElementById('page-indicator').textContent = 'Page 2 of 2';
+        document.getElementById('next-page').disabled = true;
+      }
+    }
+  </script>
+</body>
+</html>

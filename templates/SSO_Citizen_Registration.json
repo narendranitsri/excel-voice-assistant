@@ -1,0 +1,120 @@
+{
+  "name": "SSO_Citizen_Registration",
+  "portal_url": "samples/demo_portal.html",
+  "mode": "excel_to_website",
+  "created_at": "2025-03-01T10:00:00Z",
+  "mappings": [
+    {
+      "excel_column": "Applicant_Name",
+      "field_selector": "#applicant_name",
+      "field_label": "Applicant Full Name (आवेदक का नाम)",
+      "field_type": "text",
+      "parent_selector": "",
+      "transform_rule": "trim"
+    },
+    {
+      "excel_column": "Father_Name",
+      "field_selector": "#father_name",
+      "field_label": "Father / Husband Name (पिता/पति का नाम)",
+      "field_type": "text",
+      "parent_selector": "",
+      "transform_rule": "trim"
+    },
+    {
+      "excel_column": "DOB",
+      "field_selector": "#dob",
+      "field_label": "Date of Birth (DD/MM/YYYY)",
+      "field_type": "date",
+      "parent_selector": "",
+      "transform_rule": "date_dd_mm_yyyy"
+    },
+    {
+      "excel_column": "Gender",
+      "field_selector": "input[name='gender']",
+      "field_label": "Gender (लिंग)",
+      "field_type": "radio",
+      "parent_selector": "",
+      "transform_rule": "gender_normalize"
+    },
+    {
+      "excel_column": "Mobile",
+      "field_selector": "#mobile",
+      "field_label": "Mobile Number (10 Digits)",
+      "field_type": "text",
+      "parent_selector": "",
+      "transform_rule": "digits_only"
+    },
+    {
+      "excel_column": "Aadhaar",
+      "field_selector": "#aadhaar",
+      "field_label": "Aadhaar / Jan-Aadhaar No (12 Digits)",
+      "field_type": "text",
+      "parent_selector": "",
+      "transform_rule": "digits_only"
+    },
+    {
+      "excel_column": "Category",
+      "field_selector": "#category",
+      "field_label": "Social Category (श्रेणी)",
+      "field_type": "select",
+      "parent_selector": "",
+      "transform_rule": "trim"
+    },
+    {
+      "excel_column": "PIN_Code",
+      "field_selector": "#pincode",
+      "field_label": "PIN Code (6 Digits)",
+      "field_type": "text",
+      "parent_selector": "",
+      "transform_rule": "digits_only"
+    },
+    {
+      "excel_column": "District",
+      "field_selector": "#district",
+      "field_label": "District (जिला)",
+      "field_type": "select",
+      "parent_selector": "",
+      "transform_rule": "trim"
+    },
+    {
+      "excel_column": "Block",
+      "field_selector": "#block",
+      "field_label": "Block / Tehsil (ब्लॉक/तहसील)",
+      "field_type": "select",
+      "parent_selector": "#district",
+      "transform_rule": "trim"
+    },
+    {
+      "excel_column": "Village",
+      "field_selector": "#village",
+      "field_label": "Gram Panchayat / Village (गाँव/वार्ड)",
+      "field_type": "select",
+      "parent_selector": "#block",
+      "transform_rule": "trim"
+    },
+    {
+      "excel_column": "Annual_Income",
+      "field_selector": "#annual_income",
+      "field_label": "Annual Family Income (वार्षिक आय ₹)",
+      "field_type": "number",
+      "parent_selector": "",
+      "transform_rule": "digits_only"
+    },
+    {
+      "excel_column": "Photo_File",
+      "field_selector": "#applicant_photo",
+      "field_label": "Applicant Passport Photo",
+      "field_type": "file",
+      "parent_selector": "",
+      "transform_rule": "photo_compress_50kb"
+    },
+    {
+      "excel_column": "Address",
+      "field_selector": "#address",
+      "field_label": "Permanent Address (स्थायी पता)",
+      "field_type": "text",
+      "parent_selector": "",
+      "transform_rule": "trim"
+    }
+  ]
+}

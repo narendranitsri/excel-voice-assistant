@@ -1,45 +1,60 @@
-import zipfile
-import os
+"""
+scripts/make_zip.py
+Packages the complete "Excel <-> Website Automation Assistant" Python project
+(all 13 modules + requirements.txt + README.md + templates/ + samples/)
+into public/excel_website_automation_assistant.zip.
+"""
 
-files_to_pack = [
+import os
+import shutil
+import zipfile
+
+CORE_FILES = [
     "app.py",
-    "actions.py",
-    "llm_parser.py",
-    "formulas.py",
-    "quality.py",
-    "charts.py",
-    "workflows.py",
+    "importer.py",
+    "validator.py",
+    "browser.py",
+    "scanner.py",
+    "llm.py",
+    "uploader.py",
+    "filler.py",
+    "runner.py",
+    "extractor.py",
+    "reconcile.py",
+    "report.py",
     "utils.py",
-    "generate_samples.py",
     "requirements.txt",
     "README.md",
-    "sample_orders.xlsx",
-    "sample_prices.xlsx",
-    "sample_inventory.xlsx"
 ]
 
-os.makedirs("public", exist_ok=True)
-zip_destinations = [
-    "voice_controlled_excel_assistant.zip",
-    "public/voice_controlled_excel_assistant.zip"
+FOLDERS_TO_INCLUDE = [
+    "templates",
+    "samples",
 ]
 
-for zip_path in zip_destinations:
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        # Add root files
-        for fname in files_to_pack:
+
+def build_zip():
+    os.makedirs("public", exist_ok=True)
+    zip_path = os.path.join("public", "excel_website_automation_assistant.zip")
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in CORE_FILES:
             if os.path.exists(fname):
-                zipf.write(fname, arcname=fname)
-                print(f"Added {fname} to {zip_path}")
-            else:
-                print(f"Warning: {fname} does not exist.")
+                zf.write(fname, arcname=f"excel_website_automation_assistant/{fname}")
 
-        # Add samples folder
-        if os.path.exists("samples"):
-            for sname in os.listdir("samples"):
-                spath = os.path.join("samples", sname)
-                if os.path.isfile(spath):
-                    zipf.write(spath, arcname=f"samples/{sname}")
-                    print(f"Added samples/{sname} to {zip_path}")
+        for folder in FOLDERS_TO_INCLUDE:
+            if os.path.exists(folder):
+                for root, _, files in os.walk(folder):
+                    for file in files:
+                        full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(full_path, ".")
+                        zf.write(full_path, arcname=f"excel_website_automation_assistant/{rel_path}")
 
-print("Successfully generated ZIP files in root and in public/!")
+    # Also keep alias for backward compatibility in public/
+    alias_path = os.path.join("public", "voice_controlled_excel_assistant.zip")
+    shutil.copyfile(zip_path, alias_path)
+    print(f"Created {zip_path} ({os.path.getsize(zip_path)} bytes)")
+
+
+if __name__ == "__main__":
+    build_zip()

@@ -1,0 +1,22 @@
+{
+  "name": "SSO_Status_Search_Extract",
+  "portal_url": "samples/demo_portal.html#tab-search",
+  "mode": "website_to_excel",
+  "created_at": "2025-03-01T10:05:00Z",
+  "search_config": {
+    "id_column": "Application_No",
+    "search_input_selector": "#search-app-no",
+    "search_button_selector": "#btn-search-status",
+    "result_selectors": {
+      "Portal_Status": "#res-status",
+      "Approval_Date": "#res-date",
+      "Sanctioned_Amount": "#res-amount",
+      "Officer_Remarks": "#res-remarks"
+    }
+  },
+  "table_pagination_config": {
+    "table_selector": "#beneficiaries-table",
+    "next_button_selector": "button#next-page",
+    "max_pages": 2
+  }
+}

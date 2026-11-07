@@ -1,254 +1,168 @@
 """
 utils.py
 ========
-Table Extraction (PDF / Image), Speech Synthesis (gTTS), and Executive Summary Builder.
+Privacy Masking, Rate Limiting, Voice Command Parser, and Bilingual (Hindi/English) UI Helpers.
 """
 
 from __future__ import annotations
-import os
-import io
 import re
-import json
-import base64
-from typing import Dict, List, Any, Optional, Tuple
-import pandas as pd
-
-try:
-    import pdfplumber
-except ImportError:
-    pdfplumber = None
-
-try:
-    from gtts import gTTS
-except ImportError:
-    gTTS = None
-
-try:
-    from PIL import Image
-except ImportError:
-    Image = None
-
-import openpyxl
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.utils.dataframe import dataframe_to_rows
+import time
+import os
+from typing import Any, Dict, List, Optional
 
 
-def extract_table_from_pdf(pdf_file_bytes: bytes) -> List[pd.DataFrame]:
+def mask_sensitive_value(value: Any, col_name: str = "") -> str:
     """
-    Extracts tabular data from PDF files using pdfplumber.
-    Returns a list of extracted DataFrames (one per detected table).
+    Masks sensitive PII (Aadhaar, Mobile, Bank Account, PAN) so logs and AI prompts
+    never expose raw citizen data.
+    Examples:
+    - Aadhaar (12 digits): XXXXXXXX1234
+    - Mobile (10 digits): XXXXXX7890
+    - Bank Account: XXXXXXXX5678
     """
-    if pdfplumber is None:
-        raise RuntimeError("pdfplumber is not installed. Run 'pip install pdfplumber'.")
+    if value is None:
+        return ""
+    val_str = str(value).strip()
+    if not val_str or val_str.lower() == "nan":
+        return ""
 
-    extracted_dfs: List[pd.DataFrame] = []
-    with pdfplumber.open(io.BytesIO(pdf_file_bytes)) as pdf:
-        for page_idx, page in enumerate(pdf.pages):
-            tables = page.extract_tables()
-            for t_idx, tbl in enumerate(tables):
-                if tbl and len(tbl) > 1:
-                    headers = [str(h).strip() if h else f"Col_{i+1}" for i, h in enumerate(tbl[0])]
-                    data_rows = tbl[1:]
-                    df = pd.DataFrame(data_rows, columns=headers)
-                    # Clean empty rows
-                    df.dropna(how="all", inplace=True)
-                    if not df.empty:
-                        extracted_dfs.append(df.reset_index(drop=True))
+    col_lower = col_name.lower()
+    digits_only = re.sub(r"\D", "", val_str)
 
-    return extracted_dfs
+    # Check if Aadhaar (12 digits or column name indicates Aadhaar/JanAadhaar)
+    if "aadhaar" in col_lower or "aadhar" in col_lower or "जनाधार" in col_lower or "आधार" in col_lower or len(digits_only) == 12:
+        if len(digits_only) >= 4:
+            return "X" * (len(digits_only) - 4) + digits_only[-4:]
+
+    # Check if Mobile / Phone (10 digits)
+    if any(k in col_lower for k in ["mobile", "phone", "contact", "मोबाइल", "फ़ोन"]) or len(digits_only) == 10:
+        if len(digits_only) >= 4:
+            return "X" * (len(digits_only) - 4) + digits_only[-4:]
+
+    # Check if Bank Account / IFSC / PAN
+    if any(k in col_lower for k in ["account", "bank", "खाता", "pan"]):
+        if len(val_str) > 4:
+            return "X" * (len(val_str) - 4) + val_str[-4:]
+
+    return val_str
 
 
-def extract_table_from_image_with_claude(
-    image_bytes: bytes,
-    api_key: Optional[str] = None,
-    model_name: Optional[str] = None
-) -> Optional[pd.DataFrame]:
+def sanitize_sample_rows_for_ai(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """
-    Extracts tabular data from an image (photo of bill, invoice, or printed table)
-    using Claude Vision API. Returns a clean pandas DataFrame.
+    Takes 1-2 sample rows and masks all sensitive numbers before sending to Gemini for field mapping.
     """
-    resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not resolved_key:
-        raise RuntimeError("Anthropic API key is required for image table extraction.")
-
-    import anthropic
-    b64_img = base64.b64encode(image_bytes).decode("utf-8")
-    model = model_name or os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
-
-    client = anthropic.Anthropic(api_key=resolved_key)
-    prompt = """Analyze this image of a table/invoice/register and extract all structured data.
-Return ONLY a valid JSON object matching this schema:
-{
-  "headers": ["Column1", "Column2", ...],
-  "rows": [
-    ["Val1", "Val2", ...],
-    ["Val1", "Val2", ...]
-  ]
-}
-Do not include any conversational text or markdown code fences outside the JSON.
-"""
-
-    response = client.messages.create(
-        model=model,
-        max_tokens=2500,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
-                            "data": b64_img
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": prompt
-                    }
-                ]
-            }
-        ]
-    )
-
-    text_resp = "".join([b.text for b in response.content if hasattr(b, "text")])
-    match = re.search(r"\{.*\}", text_resp, re.DOTALL)
-    if match:
-        data = json.loads(match.group(0))
-        headers = data.get("headers", [])
-        rows = data.get("rows", [])
-        if headers and rows:
-            return pd.DataFrame(rows, columns=headers)
-
-    return None
+    masked_rows: List[Dict[str, str]] = []
+    for row in rows[:2]:
+        clean_row: Dict[str, str] = {}
+        for col, val in row.items():
+            clean_row[str(col)] = mask_sensitive_value(val, str(col))
+        masked_rows.append(clean_row)
+    return masked_rows
 
 
-def generate_voice_reply_audio(text_message: str, lang: str = "hi") -> Optional[bytes]:
+def format_value_for_portal(
+    value: Any,
+    transform_rule: Optional[str] = None
+) -> str:
     """
-    Generates a spoken audio clip (.mp3) using gTTS for audio voice playback.
-    lang: 'hi' for Hindi, 'en' for Indian English.
+    Applies automatic value formatting required by portals:
+    - 'date_ddmmyyyy': converts dates to DD/MM/YYYY
+    - 'date_yyyymmdd': converts dates to YYYY-MM-DD (for HTML <input type="date">)
+    - 'upper': UPPERCASE
+    - 'lower': lowercase
+    - 'title': Proper Case
+    - 'digits_only': strips spaces and dashes
     """
-    if gTTS is None:
-        return None
-    try:
-        clean_text = text_message.strip()
-        tts = gTTS(text=clean_text, lang=lang, slow=False)
-        buf = io.BytesIO()
-        tts.write_to_fp(buf)
-        buf.seek(0)
-        return buf.read()
-    except Exception as e:
-        print("gTTS generation error:", e)
-        return None
+    if value is None:
+        return ""
+    val_str = str(value).strip()
+    if val_str.lower() in ["nan", "none", "null"]:
+        return ""
+
+    # Clean trailing .0 from numeric strings read by pandas (e.g. 9876543210.0)
+    if re.match(r"^\d+\.0$", val_str):
+        val_str = val_str[:-2]
+
+    if not transform_rule or transform_rule == "none":
+        return val_str
+
+    rule = transform_rule.lower()
+    if rule == "upper":
+        return val_str.upper()
+    elif rule == "lower":
+        return val_str.lower()
+    elif rule == "title":
+        return val_str.title()
+    elif rule == "digits_only":
+        return re.sub(r"\D", "", val_str)
+    elif rule in ["date_ddmmyyyy", "date_yyyymmdd"]:
+        import pandas as pd
+        try:
+            dt = pd.to_datetime(val_str, dayfirst=True, errors="coerce")
+            if pd.notna(dt):
+                return dt.strftime("%d/%m/%Y") if rule == "date_ddmmyyyy" else dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    return val_str
 
 
-def create_executive_summary_sheet(
-    workbook: openpyxl.Workbook,
-    df: pd.DataFrame,
-    sheet_name: str = "Executive_Summary"
-) -> openpyxl.worksheet.worksheet.Worksheet:
+def parse_voice_assistant_command(command_text: str) -> Dict[str, Any]:
     """
-    Generates a professional one-page executive summary sheet inside the Excel workbook.
-    Includes:
-    - High-level KPIs (Total Records, Unique Keys, Totals, Averages)
-    - Top 5 and Bottom 5 items
-    - Key insights summary
-    - Clean typography and professional styling
+    Parses Hindi / English / Hinglish voice or text commands for both Part A (Fill) and Part B (Extract):
+    - "agli row bharo" / "fill next row" -> {"intent": "next_row"}
+    - "pehli 10 rows bharo" / "fill first 10 rows" -> {"intent": "range_rows", "count": 10}
+    - "sirf failed rows dobara chalao" / "retry failed" -> {"intent": "retry_failed"}
+    - "photo upload skip karo" -> {"intent": "skip_photos", "value": True}
+    - "is page ki table Excel mein nikalo" / "extract table" -> {"intent": "extract_table"}
+    - "sabhi application ka status check karo" / "check all status" -> {"intent": "check_all_status"}
+    - "reconcile karo" / "compare data" -> {"intent": "reconcile"}
+    - "pause karo" / "ruk jao" -> {"intent": "pause"}
+    - "scan page" / "form scan karo" -> {"intent": "scan_page"}
     """
-    if sheet_name in workbook.sheetnames:
-        ws = workbook[sheet_name]
-    else:
-        ws = workbook.create_sheet(title=sheet_name, index=0)
+    cmd = command_text.strip().lower()
+    if not cmd:
+        return {"intent": "unknown", "message": "Empty command"}
 
-    ws.views.sheetView[0].showGridLines = True
+    if any(p in cmd for p in ["table excel", "टेबल एक्सेल", "extract table", "nikalo", "निकालो"]):
+        return {
+            "intent": "extract_table",
+            "message_hi": "वेब पेज से टेबल निकालकर एक्सेल में सेव की जा रही है...",
+            "message_en": "Extracting HTML table from page into Excel..."
+        }
 
-    # Styling definitions
-    title_fill = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
-    title_font = Font(name="Calibri", size=16, bold=True, color="FFFFFF")
+    if any(p in cmd for p in ["status check", "स्टेटस चेक", "application ka status", "check all status", "स्थिति जांचो"]):
+        return {
+            "intent": "check_all_status",
+            "message_hi": "सभी आवेदन संख्याओं (Application IDs) का स्टेटस वेबसाइट से चेक किया जा रहा है...",
+            "message_en": "Checking application status for all IDs on the portal..."
+        }
 
-    card_header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
-    card_header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    if any(p in cmd for p in ["reconcile", "compare", "मिलान", "अंतर"]):
+        return {
+            "intent": "reconcile",
+            "message_hi": "एक्सेल और वेबसाइट के डेटा का मिलान (Reconcile) किया जा रहा है...",
+            "message_en": "Reconciling Excel data with website records..."
+        }
 
-    label_font = Font(name="Calibri", size=10, bold=True, color="475569")
-    val_font = Font(name="Calibri", size=12, bold=True, color="0F172A")
+    if any(p in cmd for p in ["agli row", "next row", "अगली रो", "ek row"]):
+        return {"intent": "next_row", "message_hi": "अगली रो (Row) भरी जा रही है...", "message_en": "Filling next row..."}
 
-    thin_border = Border(
-        left=Side(style="thin", color="E2E8F0"),
-        right=Side(style="thin", color="E2E8F0"),
-        top=Side(style="thin", color="E2E8F0"),
-        bottom=Side(style="thin", color="E2E8F0")
-    )
+    match_num = re.search(r"(\d+)", cmd)
+    if any(p in cmd for p in ["pehli", "first", "प्रथम", "shuru ki"]) and match_num:
+        n = int(match_num.group(1))
+        return {"intent": "range_rows", "count": n, "message_hi": f"पहली {n} पंक्तियाँ (Rows) सेलेक्ट की गईं।", "message_en": f"Selected first {n} rows."}
 
-    # 1. Main Header
-    ws.merge_cells("A1:G2")
-    title_cell = ws["A1"]
-    title_cell.value = "EXECUTIVE SUMMARY REPORT & DATA INSIGHTS"
-    title_cell.fill = title_fill
-    title_cell.font = title_font
-    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    if any(p in cmd for p in ["failed", "फेल", "dobara", "retry"]):
+        return {"intent": "retry_failed", "message_hi": "केवल फेल हुई पंक्तियों को दोबारा चलाया जा रहा है।", "message_en": "Retrying failed rows only."}
 
-    # 2. Key Metrics Cards Row
-    ws["A4"] = "METRIC"
-    ws["B4"] = "VALUE"
-    ws["A4"].fill = card_header_fill
-    ws["A4"].font = card_header_font
-    ws["B4"].fill = card_header_fill
-    ws["B4"].font = card_header_font
+    if any(p in cmd for p in ["photo", "फोटो", "document", "skip"]):
+        return {"intent": "skip_photos", "value": True, "message_hi": "फोटो अपलोड स्किप कर दिया गया है।", "message_en": "Photo upload skipped."}
 
-    metrics = [
-        ("Total Rows in Dataset", len(df)),
-        ("Total Columns", len(df.columns)),
-        ("Duplicate Rows Detected", int(df.duplicated().sum()))
-    ]
+    if any(p in cmd for p in ["pause", "ruk", "रुक", "stop", "रोको"]):
+        return {"intent": "pause", "message_hi": "ऑटो-फिलर रोक दिया गया है।", "message_en": "Auto-filler paused."}
 
-    # Numeric metrics
-    num_cols = df.select_dtypes(include=["number"]).columns
-    for c in num_cols[:3]:
-        metrics.append((f"Total {c}", round(float(df[c].sum()), 2)))
-        metrics.append((f"Average {c}", round(float(df[c].mean()), 2)))
+    if any(p in cmd for p in ["scan", "स्कैन", "teach"]):
+        return {"intent": "scan_page", "message_hi": "वेब पेज के फॉर्म फील्ड्स स्कैन किए जा रहे हैं...", "message_en": "Scanning form fields on page..."}
 
-    cur_row = 5
-    for label, val in metrics:
-        ws.cell(row=cur_row, column=1, value=label).font = label_font
-        cell_val = ws.cell(row=cur_row, column=2, value=val)
-        cell_val.font = val_font
-        cell_val.alignment = Alignment(horizontal="right")
-        ws.cell(row=cur_row, column=1).border = thin_border
-        ws.cell(row=cur_row, column=2).border = thin_border
-        cur_row += 1
-
-    # 3. Top 5 Items Table
-    if len(num_cols) > 0 and len(df) >= 5:
-        sort_col = num_cols[0]
-        top_5 = df.sort_values(by=sort_col, ascending=False).head(5)
-        
-        ws["D4"] = f"TOP 5 PERFORMERS BY {sort_col.upper()}"
-        ws.merge_cells("D4:G4")
-        ws["D4"].fill = card_header_fill
-        ws["D4"].font = card_header_font
-        ws["D4"].alignment = Alignment(horizontal="center")
-
-        # Headers
-        disp_cols = list(df.columns[:4])
-        for idx, col_name in enumerate(disp_cols, start=4):
-            c_cell = ws.cell(row=5, column=idx, value=col_name)
-            c_cell.font = Font(name="Calibri", size=10, bold=True)
-            c_cell.border = thin_border
-
-        for r_idx, (_, r_data) in enumerate(top_5.iterrows(), start=6):
-            for c_idx, col_name in enumerate(disp_cols, start=4):
-                val_c = ws.cell(row=r_idx, column=c_idx, value=r_data[col_name])
-                val_c.font = Font(name="Calibri", size=10)
-                val_c.border = thin_border
-
-    # Adjust widths
-    ws.column_dimensions["A"].width = 28
-    ws.column_dimensions["B"].width = 18
-    ws.column_dimensions["C"].width = 5
-    ws.column_dimensions["D"].width = 24
-    ws.column_dimensions["E"].width = 22
-    ws.column_dimensions["F"].width = 16
-    ws.column_dimensions["G"].width = 16
-
-    return ws
+    return {"intent": "unknown", "message_hi": f"कमांड समझ नहीं आया: '{command_text}'", "message_en": f"Command not recognized: '{command_text}'"}
